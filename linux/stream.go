@@ -170,18 +170,27 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 
 	pipeline := []string{"-q",
 		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
-		"!", "videoconvert", "!", "videoscale",
+		"!", "videoconvert", "n-threads=2", "!", "videoscale",
 		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d", sess.W, sess.H),
-		"!", "openh264enc", "bitrate=" + strconv.Itoa(sess.Bitrate), "usage-type=screen", "rate-control=bitrate",
-		"gop-size=" + strconv.Itoa(sess.FPS*2), "complexity=low", "multi-thread=4", "slice-mode=n-slices", "num-slices=4",
-		"!", "h264parse", "config-interval=-1",
-		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "fdsink", "fd=1",
+		"!", "fdsink", "fd=1", "sync=false",
+	}
+	// gst only captures and converts; ffmpeg's threaded OpenH264 encodes (gst's encoder is single-threaded and too slow).
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return
 	}
 	cmd := exec.Command("gst-launch-1.0", pipeline...)
 	cmd.ExtraFiles = []*os.File{cap.PWFile}
+	cmd.Stdout = pw
 	cmd.Stderr = &logWriter{prefix: "gst: "}
-	out, err := cmd.StdoutPipe()
+	enc := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32",
+		"-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", fmt.Sprintf("%dx%d", sess.W, sess.H), "-framerate", strconv.Itoa(sess.FPS), "-i", "pipe:0",
+		"-c:v", "libopenh264", "-b:v", strconv.Itoa(sess.Bitrate), "-g", strconv.Itoa(sess.FPS*2), "-slices", "4", "-threads", "4",
+		"-allow_skip_frames", "0", "-profile:v", "constrained_baseline", "-flags", "+low_delay",
+		"-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1")
+	enc.Stdin = pr
+	enc.Stderr = &logWriter{prefix: "ffmpeg: "}
+	out, err := enc.StdoutPipe()
 	if err != nil {
 		return
 	}
@@ -189,14 +198,23 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 		notify("Matlink", "gst-launch-1.0 failed to start: "+err.Error())
 		return
 	}
-	defer func() { cmd.Process.Kill(); cmd.Wait() }()
-	go func() { <-done; cmd.Process.Kill() }()
+	pw.Close()
+	if err := enc.Start(); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		notify("Matlink", "ffmpeg failed to start: "+err.Error())
+		return
+	}
+	pr.Close()
+	kill := func() { cmd.Process.Kill(); enc.Process.Kill() }
+	defer func() { kill(); cmd.Wait(); enc.Wait() }()
+	go func() { <-done; kill() }()
 
 	fmt.Fprintf(c, "{\"w\":%d,\"h\":%d,\"fps\":%d}\n", sess.W, sess.H, sess.FPS)
 	s.OnState(fmt.Sprintf("Streaming %dx%d@%d to %s", sess.W, sess.H, sess.FPS, hello.Model))
 
 	// Detect a dead peer: the app never sends after hello, so any read return means close.
-	go func() { io.Copy(io.Discard, c); s.mu.Lock(); s.mu.Unlock(); cmd.Process.Kill() }()
+	go func() { io.Copy(io.Discard, c); kill() }()
 
 	br := bufio.NewReaderSize(out, 1<<20)
 	err = relayAccessUnits(br, c)

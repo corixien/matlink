@@ -12,7 +12,7 @@ import (
 	"fyne.io/systray"
 )
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 var (
 	mStatus *systray.MenuItem
@@ -74,7 +74,7 @@ func onReady() {
 		return
 	}
 
-	for _, dep := range []struct{ bin, pkg string }{{"adb", "android-tools"}, {"gst-launch-1.0", "gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 pipewire-gstreamer"}, {"kscreen-doctor", "kscreen"}} {
+	for _, dep := range []struct{ bin, pkg string }{{"adb", "android-tools"}, {"ffmpeg", "ffmpeg-free"}, {"gst-launch-1.0", "gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 pipewire-gstreamer"}, {"kscreen-doctor", "kscreen"}} {
 		if _, err := exec.LookPath(dep.bin); err != nil {
 			notify("Matlink", fmt.Sprintf("Missing %s. Run: sudo dnf install %s", dep.bin, dep.pkg))
 			log.Printf("missing dependency %s", dep.bin)

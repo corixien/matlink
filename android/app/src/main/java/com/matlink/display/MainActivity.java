@@ -259,6 +259,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         byte[] first = new byte[firstLen];
         in.readFully(first);
         byte[][] csd = extractCsd(first);
+        StringBuilder hx = new StringBuilder();
+        for (int i = 0; i < Math.min(40, first.length); i++) hx.append(String.format("%02x", first[i]));
+        android.util.Log.i("matlink", "first AU len " + firstLen + " head " + hx + " csd " + (csd[0] == null ? -1 : csd[0].length) + "/" + (csd[1] == null ? -1 : csd[1].length));
         MediaCodec codec = null;
         // Try every AVC decoder (hardware first) with gentler configs: some vendor decoders reject
         // realtime priority or low-latency hints.
@@ -281,7 +284,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     codec = c;
                     android.util.Log.i("matlink", "decoder " + name + " attempt " + attempt);
                 } catch (Exception e) {
-                    android.util.Log.w("matlink", "decoder " + name + " attempt " + attempt + " failed: " + e);
+                    android.util.Log.w("matlink", "decoder " + name + " attempt " + attempt + " failed: " + e, e);
                     try { c.release(); } catch (Exception ignored) { }
                 }
             }

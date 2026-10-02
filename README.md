@@ -8,10 +8,10 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
 
 1. Install the dependencies on the PC (most are already present on Fedora KDE):
    ```
-   sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264
+   sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 ffmpeg-free
    ```
 2. On the tablet enable **Developer options** and **USB debugging** (Settings > About tablet > tap *Build number* 7 times).
-3. Download `Matlink-1.0.0-x86_64.AppImage` from the [latest release](../../releases/latest), then:
+3. Download `Matlink-1.0.1-x86_64.AppImage` from the [latest release](../../releases/latest), then:
    ```
    chmod +x Matlink-*-x86_64.AppImage
    ./Matlink-*-x86_64.AppImage
@@ -36,4 +36,4 @@ Not included yet: touch input back to the PC, audio.
 
 ## How it works
 
-`adb reverse` maps a TCP port on the tablet to the PC. The app connects, sends its size/preferences, the PC opens an xdg-desktop-portal ScreenCast session with a virtual source, sets the mode via `kscreen-doctor`, and pipes PipeWire through `gst-launch-1.0` (OpenH264) to the app, which decodes with `MediaCodec` onto a `SurfaceView`. Config: `~/.config/matlink/config.json`, log: `~/.cache/matlink/matlink.log`.
+`adb reverse` maps a TCP port on the tablet to the PC. The app connects, sends its size/preferences, the PC opens an xdg-desktop-portal ScreenCast session with a virtual source, sets the mode via `kscreen-doctor`, and captures PipeWire with `gst-launch-1.0` and encodes with `ffmpeg` (multi-threaded OpenH264) to the app, which decodes with `MediaCodec` onto a `SurfaceView`. Config: `~/.config/matlink/config.json`, log: `~/.cache/matlink/matlink.log`.
