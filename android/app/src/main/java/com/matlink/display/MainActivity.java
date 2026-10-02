@@ -98,7 +98,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         super.onResume();
         applyPrefs();
         hideSystemUi();
-        if (surface != null) startWorker();
+        if (surface != null && !running) startWorker();
     }
 
     @Override

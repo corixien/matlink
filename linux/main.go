@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"fyne.io/systray"
 )
 
-const version = "1.0.2"
+const version = "1.0.3"
 
 var (
 	mStatus *systray.MenuItem
@@ -52,6 +54,7 @@ func main() {
 		log.SetOutput(f)
 	}
 	loadConfig()
+	redirectStderr()
 	systray.Run(onReady, func() {})
 }
 
@@ -139,6 +142,26 @@ func onReady() {
 	mQuit := systray.AddMenuItem("Quit", "")
 	go func() { <-mQuit.ClickedCh; srv.Stop(); systray.Quit() }()
 	setStatus()
+
+	// watchdog: re-create the USB tunnel if adb restarted and dropped it
+	go func() {
+		for range time.Tick(15 * time.Second) {
+			conf := getConfig()
+			if !conf.Enabled {
+				continue
+			}
+			for serial, st := range snapshotDevices() {
+				if st != "device" {
+					continue
+				}
+				out, _ := adb("-s", serial, "reverse", "--list")
+				if !strings.Contains(out, fmt.Sprintf("tcp:%d", conf.Port)) {
+					log.Printf("reverse tunnel missing for %s, restoring", serial)
+					adb("-s", serial, "reverse", fmt.Sprintf("tcp:%d", conf.Port), fmt.Sprintf("tcp:%d", conf.Port))
+				}
+			}
+		}
+	}()
 
 	// device tracking
 	ch := make(chan map[string]string, 4)
@@ -278,4 +301,12 @@ func setAutostart(on bool) {
 	body := "[Desktop Entry]\nType=Application\nName=Matlink\nComment=Use an Android tablet as a USB second monitor\nExec=\"" +
 		strings.ReplaceAll(exe, "\"", "\\\"") + "\"\nIcon=matlink\nX-GNOME-Autostart-enabled=true\n"
 	os.WriteFile(autostartPath(), []byte(body), 0o644)
+}
+
+// redirectStderr sends panics and runtime crashes to the log file.
+func redirectStderr() {
+	d, _ := os.UserCacheDir()
+	if f, err := os.OpenFile(filepath.Join(d, "matlink", "matlink.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		syscall.Dup2(int(f.Fd()), 2)
+	}
 }

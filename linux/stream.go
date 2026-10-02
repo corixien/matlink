@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +92,7 @@ func resolve(h Hello, c Config) Session {
 
 // Server accepts tablet connections.
 type Server struct {
+	sessMu  sync.Mutex // one capture session at a time
 	ln      net.Listener
 	mu      sync.Mutex
 	cancel  func()
@@ -135,6 +137,12 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handle(c net.Conn, done chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in session: %v\n%s", r, debug.Stack())
+			s.OnState("")
+		}
+	}()
 	c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := bufio.NewReader(c).ReadBytes('\n')
 	if err != nil {
@@ -144,6 +152,13 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 	var hello Hello
 	if json.Unmarshal(line, &hello) != nil {
 		return
+	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	select {
+	case <-done: // superseded while waiting
+		return
+	default:
 	}
 	conf := getConfig()
 	if !conf.Enabled {
