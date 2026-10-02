@@ -11,7 +11,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
    sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 ffmpeg-free
    ```
 2. On the tablet enable **Developer options** and **USB debugging** (Settings > About tablet > tap *Build number* 7 times).
-3. Download `Matlink-1.0.1-x86_64.AppImage` from the [latest release](../../releases/latest), then:
+3. Download `Matlink-1.0.2-x86_64.AppImage` from the [latest release](../../releases/latest), then:
    ```
    chmod +x Matlink-*-x86_64.AppImage
    ./Matlink-*-x86_64.AppImage
@@ -23,6 +23,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
 
 - Automatic: detects the tablet, sets up the USB tunnel, installs/updates and launches the app, creates the virtual monitor, removes it when unplugged.
 - Resolution matched to the tablet (capped to what its hardware H.264 decoder supports), portrait or landscape, UI scale from the tablet density.
+- Hardware H.264 encoding on the PC (Intel/AMD via VAAPI) when available, automatic software fallback. On Fedora install the full media driver for this: RPM Fusion, then `sudo dnf swap libva-intel-media-driver intel-media-driver --allowerasing` (Intel).
 - Hardware decoding on the tablet, low-latency H.264 over USB (no Wi-Fi needed).
 - Cursor shown on the tablet; the monitor appears as a normal extra screen in System Settings > Display.
 - Tray settings (PC): enable/disable, resolution (auto or fixed), frame rate, quality, UI scale, position (right/left/above/below), launch app automatically, install/update app automatically, start at login, reconnect.

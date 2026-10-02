@@ -168,10 +168,15 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 		log.Printf("display config: %v", err)
 	}
 
+	hw := vaapiOK()
+	pixFmt, ffPix := "I420", "yuv420p"
+	if hw {
+		pixFmt, ffPix = "NV12", "nv12"
+	}
 	pipeline := []string{"-q",
 		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
 		"!", "videoconvert", "n-threads=2", "!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d", sess.W, sess.H),
+		"!", fmt.Sprintf("video/x-raw,format=%s,width=%d,height=%d", pixFmt, sess.W, sess.H),
 		"!", "fdsink", "fd=1", "sync=false",
 	}
 	// gst only captures and converts; ffmpeg's threaded OpenH264 encodes (gst's encoder is single-threaded and too slow).
@@ -183,11 +188,23 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 	cmd.ExtraFiles = []*os.File{cap.PWFile}
 	cmd.Stdout = pw
 	cmd.Stderr = &logWriter{prefix: "gst: "}
-	enc := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32",
-		"-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", fmt.Sprintf("%dx%d", sess.W, sess.H), "-framerate", strconv.Itoa(sess.FPS), "-i", "pipe:0",
-		"-c:v", "libopenh264", "-b:v", strconv.Itoa(sess.Bitrate), "-g", strconv.Itoa(sess.FPS*2), "-slices", "4", "-threads", "4",
-		"-allow_skip_frames", "0", "-profile:v", "constrained_baseline", "-flags", "+low_delay",
-		"-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1")
+	args := []string{"-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32"}
+	if hw {
+		args = append(args, "-vaapi_device", vaapiDevice)
+	}
+	args = append(args, "-f", "rawvideo", "-pix_fmt", ffPix, "-video_size", fmt.Sprintf("%dx%d", sess.W, sess.H),
+		"-framerate", strconv.Itoa(sess.FPS), "-i", "pipe:0")
+	brate := strconv.Itoa(sess.Bitrate)
+	if hw {
+		args = append(args, "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", brate, "-maxrate", brate,
+			"-g", strconv.Itoa(sess.FPS*2), "-bf", "0", "-async_depth", "1", "-profile:v", "constrained_baseline")
+	} else {
+		args = append(args, "-c:v", "libopenh264", "-b:v", brate, "-g", strconv.Itoa(sess.FPS*2), "-slices", "4", "-threads", "4",
+			"-allow_skip_frames", "0", "-profile:v", "constrained_baseline", "-flags", "+low_delay")
+	}
+	args = append(args, "-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1")
+	log.Printf("encoder: hardware(vaapi)=%v", hw)
+	enc := exec.Command("ffmpeg", args...)
 	enc.Stdin = pr
 	enc.Stderr = &logWriter{prefix: "ffmpeg: "}
 	out, err := enc.StdoutPipe()
@@ -285,4 +302,24 @@ func findAUD(b []byte, from int) int {
 		}
 		from = i + 3
 	}
+}
+
+const vaapiDevice = "/dev/dri/renderD128"
+
+var (
+	vaapiOnce sync.Once
+	vaapiYes  bool
+)
+
+// vaapiOK reports whether ffmpeg can hardware-encode H.264 through VAAPI (needs the freeworld media driver on Fedora).
+func vaapiOK() bool {
+	vaapiOnce.Do(func() {
+		if _, err := os.Stat(vaapiDevice); err != nil {
+			return
+		}
+		err := exec.Command("ffmpeg", "-v", "error", "-vaapi_device", vaapiDevice, "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+			"-frames:v", "2", "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-f", "null", "-").Run()
+		vaapiYes = err == nil
+	})
+	return vaapiYes
 }
