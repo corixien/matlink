@@ -2,7 +2,7 @@ package main
 
 import _ "embed"
 
-//go:embed assets/icon.png
+//go:embed assets/tray.png
 var iconPNG []byte
 
 //go:embed assets/matlink.apk

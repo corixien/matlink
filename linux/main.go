@@ -14,7 +14,7 @@ import (
 	"fyne.io/systray"
 )
 
-const version = "1.0.3"
+const version = "1.0.4"
 
 var (
 	mStatus *systray.MenuItem

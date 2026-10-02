@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f95e8"/><stop offset="0.45" stop-color="#1f66d3"/><stop offset="1" stop-color="#16277c"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d9efff"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/><stop offset="1" stop-color="#ffffff" stop-opacity="0.18"/>
+    </linearGradient>
+    <clipPath id="shape"><rect width="1024" height="1024" rx="232"/></clipPath>
+  </defs>
+  <g clip-path="url(#shape)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="560" fill="url(#shine)"/>
+  </g>
+
+  <circle cx="512" cy="512" r="290" fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="64"/>
+  <path d="M512 222 A290 290 0 1 1 222 512" fill="none" stroke="url(#mark)" stroke-width="64" stroke-linecap="round"/>
+  <rect x="392" y="400" width="240" height="170" rx="26" fill="url(#mark)"/>
+  <rect x="415" y="423" width="194" height="124" rx="10" fill="#1f66d3"/>
+  <rect x="470" y="580" width="84" height="22" rx="11" fill="url(#mark)"/>
+</svg>
