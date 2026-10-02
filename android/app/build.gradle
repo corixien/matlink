@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.matlink.display'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.matlink.display'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            def ks = System.getenv('MATLINK_KEYSTORE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('MATLINK_KS_PASS')
+                keyAlias 'matlink'
+                keyPassword System.getenv('MATLINK_KS_PASS')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv('MATLINK_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
