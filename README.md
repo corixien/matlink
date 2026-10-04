@@ -11,7 +11,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
    sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 ffmpeg-free
    ```
 2. On the tablet enable **Developer options** and **USB debugging** (Settings > About tablet > tap *Build number* 7 times).
-3. Download `Matlink-1.0.4-x86_64.AppImage` from the [latest release](../../releases/latest), then:
+3. Download `Matlink-1.0.5-x86_64.AppImage` from the [latest release](../../releases/latest), then:
    ```
    chmod +x Matlink-*-x86_64.AppImage
    ./Matlink-*-x86_64.AppImage

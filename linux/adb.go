@@ -17,7 +17,7 @@ import (
 const (
 	appPackage     = "com.matlink.display"
 	appActivity    = appPackage + "/.MainActivity"
-	appVersionCode = 4 // keep in sync with android/app/build.gradle
+	appVersionCode = 5 // keep in sync with android/app/build.gradle
 )
 
 type DeviceEvent struct {

@@ -41,13 +41,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView status;
     private TextView stats;
     private Button settingsBtn;
+    private android.widget.LinearLayout buttons;
     private volatile Surface surface;
     private Thread worker;
     private volatile boolean running;
     private volatile Socket socket;
     private int shownW, shownH;
     private final Runnable hideButton = () -> {
-        if (shownW > 0) settingsBtn.setVisibility(View.GONE);
+        if (shownW > 0) buttons.setVisibility(View.GONE);
     };
 
     @Override
@@ -74,16 +75,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         stats.setBackgroundColor(0x88000000);
         root.addView(stats, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
 
+        buttons = new android.widget.LinearLayout(this);
+        Button reloadBtn = new Button(this);
+        reloadBtn.setText("Reload");
+        reloadBtn.setOnClickListener(v -> reload());
         settingsBtn = new Button(this);
         settingsBtn.setText("Settings");
         settingsBtn.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        buttons.addView(reloadBtn);
+        buttons.addView(settingsBtn);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
         lp.setMargins(0, 0, 32, 32);
-        root.addView(settingsBtn, lp);
+        root.addView(buttons, lp);
 
         root.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) {
-                settingsBtn.setVisibility(View.VISIBLE);
+                buttons.setVisibility(View.VISIBLE);
                 ui.removeCallbacks(hideButton);
                 ui.postDelayed(hideButton, 4000);
             }
@@ -145,16 +152,30 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     // ---- surface ----
-    @Override public void surfaceCreated(SurfaceHolder h) { surface = h.getSurface(); if (!running) startWorker(); }
+    @Override public void surfaceCreated(SurfaceHolder h) { if (h != surfaceView.getHolder()) return; surface = h.getSurface(); if (!running) startWorker(); }
     @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
-    @Override public void surfaceDestroyed(SurfaceHolder h) { stopWorker(); surface = null; }
+    @Override public void surfaceDestroyed(SurfaceHolder h) { if (h != surfaceView.getHolder()) return; stopWorker(); surface = null; }
+
+    /** Drops the connection and the video surface, then reconnects from scratch. */
+    private void reload() {
+        stopWorker();
+        surface = null;
+        root.removeView(surfaceView);
+        surfaceView = new SurfaceView(this);
+        surfaceView.getHolder().addCallback(this);
+        root.addView(surfaceView, 0, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        shownW = 0;
+        setStatus("Reloading...");
+        ui.removeCallbacks(hideButton);
+        ui.postDelayed(hideButton, 4000);
+    }
 
     private void setStatus(String s) {
         ui.post(() -> {
             status.setText(s);
             status.setVisibility(s == null || s.isEmpty() ? View.GONE : View.VISIBLE);
             if (s != null && !s.isEmpty()) {
-                settingsBtn.setVisibility(View.VISIBLE);
+                buttons.setVisibility(View.VISIBLE);
             }
         });
     }
