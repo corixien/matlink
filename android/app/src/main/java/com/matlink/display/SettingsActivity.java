@@ -31,7 +31,7 @@ public class SettingsActivity extends Activity {
         spinner(root, "Resolution", Prefs.RES_LABELS, Prefs.indexOf(Prefs.RES_VALUES, prefs.maxRes()),
                 i -> prefs.edit().putInt("maxRes", Prefs.RES_VALUES[i]).apply());
         spinner(root, "Frame rate", Prefs.FPS_LABELS, Prefs.indexOf(Prefs.FPS_VALUES, prefs.fps()),
-                i -> prefs.edit().putInt("fps", Prefs.FPS_VALUES[i]).apply());
+                i -> prefs.edit().putInt("fpsMode", Prefs.FPS_VALUES[i]).apply());
         spinner(root, "Quality", Prefs.QUALITY_LABELS, Prefs.indexOf(Prefs.QUALITY_VALUES, prefs.quality()),
                 i -> prefs.edit().putString("quality", Prefs.QUALITY_VALUES[i]).apply());
         check(root, "Keep screen on while connected", prefs.keepAwake(), v -> prefs.edit().putBoolean("keepAwake", v).apply());

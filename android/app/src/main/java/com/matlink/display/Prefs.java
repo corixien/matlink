@@ -22,7 +22,7 @@ final class Prefs {
     SharedPreferences.Editor edit() { return sp.edit(); }
     String orientation() { return sp.getString("orientation", "landscape"); }
     int maxRes() { return sp.getInt("maxRes", 0); }
-    int fps() { return sp.getInt("fps", 0); }
+    int fps() { return sp.getInt("fpsMode", 0); }
     String quality() { return sp.getString("quality", "high"); }
     boolean keepAwake() { return sp.getBoolean("keepAwake", true); }
     boolean showStats() { return sp.getBoolean("showStats", false); }
