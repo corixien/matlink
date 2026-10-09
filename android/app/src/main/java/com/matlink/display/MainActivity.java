@@ -198,7 +198,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         stopWorker();
         running = true;
         final Surface s = surface;
-        worker = new Thread(() -> loop(s), "matlink-stream");
+        worker = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+            loop(s);
+        }, "matlink-stream");
         worker.start();
     }
 
@@ -233,7 +236,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         getWindowManager().getDefaultDisplay().getRealMetrics(dm);
         int w = dm.widthPixels, h = dm.heightPixels;
         int dpi = dm.densityDpi;
-        int[] fit = clampToDecoder(w, h, prefs.fps());
+        int fps = prefs.fps();
+        if (fps <= 0) {
+            fps = Math.max(30, Math.min(120, Math.round(getWindowManager().getDefaultDisplay().getRefreshRate())));
+        }
+        int[] fit = clampToDecoder(w, h, fps);
         if (fit[0] != w) {
             dpi = dpi * fit[0] / w;
             w = fit[0];
@@ -247,7 +254,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             OutputStream out = sk.getOutputStream();
             JSONObject hello = new JSONObject();
             hello.put("v", 1).put("w", w).put("h", h).put("dpi", dpi).put("model", Build.MODEL)
-                    .put("maxH", prefs.maxRes()).put("fps", prefs.fps()).put("quality", prefs.quality());
+                    .put("maxH", prefs.maxRes()).put("fps", fps).put("quality", prefs.quality());
             out.write((hello.toString() + "\n").getBytes("UTF-8"));
             out.flush();
             InputStream in = new BufferedInputStream(sk.getInputStream(), 1 << 20);
@@ -256,6 +263,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             int vw = reply.getInt("w"), vh = reply.getInt("h");
             setStatus("");
             fit(vw, vh);
+            if (Build.VERSION.SDK_INT >= 30) {
+                try { s.setFrameRate(reply.optInt("fps", fps), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE); } catch (Exception ignored) { }
+            }
             decode(din, s, vw, vh);
         } finally {
             try { sk.close(); } catch (IOException ignored) { }
@@ -276,6 +286,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void decode(DataInputStream in, Surface s, int w, int h) throws Exception {
         int firstLen = in.readInt();
         long firstPts = in.readLong();
+        baseNs = System.nanoTime();
+        minLagUs = -firstPts;
+        queuedAt.clear();
         if (firstLen <= 0 || firstLen > (16 << 20)) throw new IOException("bad frame");
         byte[] first = new byte[firstLen];
         in.readFully(first);
@@ -296,8 +309,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csd[0]));
                     fmt.setByteBuffer("csd-1", ByteBuffer.wrap(csd[1]));
                 }
-                if (attempt >= 1) fmt.setInteger(MediaFormat.KEY_PRIORITY, 1);
-                if (attempt == 0 && Build.VERSION.SDK_INT >= 30) fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+                // attempt 0: everything that cuts decoder latency (realtime priority, max clocks, vendor low-latency
+                // modes); attempt 1: only the standard low-latency hint; attempt 2: plain config.
+                if (attempt == 0) {
+                    fmt.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                    fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE);
+                    fmt.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
+                    fmt.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1);
+                    fmt.setInteger("vendor.low-latency.enable", 1);
+                } else if (attempt == 2) {
+                    fmt.setInteger(MediaFormat.KEY_PRIORITY, 1);
+                }
+                if (attempt <= 1 && Build.VERSION.SDK_INT >= 30) fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
                 MediaCodec c = MediaCodec.createByCodecName(name);
                 try {
                     c.configure(fmt, s, null, 0);
@@ -315,19 +338,30 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final MediaCodec dec = codec;
         final boolean[] alive = {true};
         Thread drain = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            long frames = 0, last = System.nanoTime();
+            long frames = 0, last = System.nanoTime(), decSumNs = 0;
             while (alive[0]) {
                 try {
                     int idx = dec.dequeueOutputBuffer(info, 20000);
                     if (idx >= 0) {
                         dec.releaseOutputBuffer(idx, true);
-                        frames++;
                         long now = System.nanoTime();
+                        Long q = queuedAt.remove(info.presentationTimeUs);
+                        if (q != null) decSumNs += now - q;
+                        frames++;
                         if (now - last >= 1_000_000_000L) {
-                            final String t = w + "x" + h + "  " + frames + " fps  " + (statBytes / 125000) + " Mbit/s";
+                            final long cnt = Math.max(frames, 1);
+                            final float decMs = decSumNs / cnt / 1e6f;
+                            final float netMs = netLagSumUs / Math.max(netLagCount, 1) / 1000f;
+                            final String t = String.format(java.util.Locale.US, "%dx%d  %d fps  %d Mbit/s  decode %.1f ms  link +%.1f ms",
+                                    w, h, frames, statBytes / 125000, decMs, netMs);
+                            android.util.Log.i("matlink", t);
                             statBytes = 0;
+                            netLagSumUs = 0;
+                            netLagCount = 0;
                             frames = 0;
+                            decSumNs = 0;
                             last = now;
                             if (prefs.showStats()) ui.post(() -> stats.setText(t));
                         }
@@ -351,12 +385,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 ByteBuffer ib = dec.getInputBuffer(idx);
                 ib.clear();
                 ib.put(buf, 0, len);
+                if (queuedAt.size() > 256) queuedAt.clear();
+                queuedAt.put(pts, System.nanoTime());
                 dec.queueInputBuffer(idx, 0, len, pts, 0);
                 len = in.readInt();
                 pts = in.readLong();
                 if (len <= 0 || len > (16 << 20)) throw new IOException("bad frame");
                 if (len > buf.length) buf = new byte[len];
                 in.readFully(buf, 0, len);
+                // Link lag: how much later than the best case this frame arrived (PC and tablet clocks differ,
+                // so only the excess over the fastest frame seen is meaningful).
+                long lag = (System.nanoTime() - baseNs) / 1000 - pts;
+                if (lag < minLagUs) minLagUs = lag;
+                netLagSumUs += lag - minLagUs;
+                netLagCount++;
             }
         } finally {
             alive[0] = false;
@@ -367,6 +409,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private volatile long statBytes;
+    private volatile long netLagSumUs, netLagCount;
+    private long baseNs = System.nanoTime(), minLagUs = Long.MAX_VALUE;
+    private final java.util.concurrent.ConcurrentHashMap<Long, Long> queuedAt = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Shrinks the requested size (keeping aspect) until the hardware AVC decoder accepts it. */
     private static int[] clampToDecoder(int w, int h, int fps) {

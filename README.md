@@ -11,7 +11,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
    sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 ffmpeg-free
    ```
 2. On the tablet enable **Developer options** and **USB debugging** (Settings > About tablet > tap *Build number* 7 times).
-3. Download `Matlink-1.0.5-x86_64.AppImage` from the [latest release](../../releases/latest), then:
+3. Download `Matlink-1.1.0-x86_64.AppImage` from the [latest release](../../releases/latest), then:
    ```
    chmod +x Matlink-*-x86_64.AppImage
    ./Matlink-*-x86_64.AppImage
@@ -23,11 +23,12 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
 
 - Automatic: detects the tablet, sets up the USB tunnel, installs/updates and launches the app, creates the virtual monitor, removes it when unplugged.
 - Resolution matched to the tablet (capped to what its hardware H.264 decoder supports), portrait or landscape, UI scale from the tablet density.
-- Hardware H.264 encoding on the PC (Intel/AMD via VAAPI) when available, automatic software fallback. On Fedora install the full media driver for this: RPM Fusion, then `sudo dnf swap libva-intel-media-driver intel-media-driver --allowerasing` (Intel).
+- Low latency: the whole PC side runs on the GPU (PipeWire DMA-BUF, VA scaling and VA H.264 encoder in one GStreamer pipeline, no raw frames through pipes, each frame sent the moment it is encoded). The stream is rewritten to picture-order type 2 so the tablet's hardware decoder outputs every frame immediately. Needs the full media driver on Fedora: RPM Fusion, then `sudo dnf swap libva-intel-media-driver intel-media-driver --allowerasing` (Intel). Without it, Matlink falls back to GStreamer capture with ffmpeg (VAAPI or OpenH264) encoding, which has higher latency.
+- Frame rate follows the tablet's screen refresh (e.g. 90 Hz) by default.
 - Hardware decoding on the tablet, low-latency H.264 over USB (no Wi-Fi needed).
 - Cursor shown on the tablet; the monitor appears as a normal extra screen in System Settings > Display.
 - Tray settings (PC): enable/disable, resolution (auto or fixed), frame rate, quality, UI scale, position (right/left/above/below), launch app automatically, install/update app automatically, start at login, reconnect.
-- App settings (tablet, tap the screen then *Settings*): orientation, resolution cap, frame rate, quality, keep screen on, stats overlay. The PC follows the tablet request unless a PC setting overrides it.
+- App settings (tablet, tap the screen then *Settings*): orientation, resolution cap, frame rate (match screen refresh, 60 or 30), quality, keep screen on, stats overlay. The PC follows the tablet request unless a PC setting overrides it.
 
 Not included yet: touch input back to the PC, audio.
 
@@ -37,4 +38,4 @@ Not included yet: touch input back to the PC, audio.
 
 ## How it works
 
-`adb reverse` maps a TCP port on the tablet to the PC. The app connects, sends its size/preferences, the PC opens an xdg-desktop-portal ScreenCast session with a virtual source, sets the mode via `kscreen-doctor`, and captures PipeWire with `gst-launch-1.0` and encodes with `ffmpeg` (multi-threaded OpenH264) to the app, which decodes with `MediaCodec` onto a `SurfaceView`. Config: `~/.config/matlink/config.json`, log: `~/.cache/matlink/matlink.log`.
+`adb reverse` maps a TCP port on the tablet to the PC. The app connects, sends its size/preferences, the PC opens an xdg-desktop-portal ScreenCast session with a virtual source, sets the mode via `kscreen-doctor`, and runs one `gst-launch-1.0` pipeline (`pipewiresrc ! vapostproc ! vah264enc ! h264parse ! gdppay`). Matlink unpacks the access units, rewrites the SPS and slice headers to picture-order type 2 and forwards each frame at once to the app, which decodes with `MediaCodec` (realtime priority, vendor low-latency modes) onto a `SurfaceView`. The fallback pipeline is `gst-launch-1.0` capture plus `ffmpeg`. Enable *Show stream stats overlay* on the tablet to see fps, bitrate, decode time and link lag. Config: `~/.config/matlink/config.json`, log: `~/.cache/matlink/matlink.log`.

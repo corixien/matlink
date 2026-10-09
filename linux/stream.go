@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -183,74 +185,57 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 		log.Printf("display config: %v", err)
 	}
 
-	hw := vaapiOK()
-	pixFmt, ffPix := "I420", "yuv420p"
-	if hw {
-		pixFmt, ffPix = "NV12", "nv12"
-	}
-	pipeline := []string{"-q",
-		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
-		"!", "videoconvert", "n-threads=2", "!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,format=%s,width=%d,height=%d", pixFmt, sess.W, sess.H),
-		"!", "fdsink", "fd=1", "sync=false",
-	}
-	// gst only captures and converts; ffmpeg's threaded OpenH264 encodes (gst's encoder is single-threaded and too slow).
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return
-	}
-	cmd := exec.Command("gst-launch-1.0", pipeline...)
-	cmd.ExtraFiles = []*os.File{cap.PWFile}
-	cmd.Stdout = pw
-	cmd.Stderr = &logWriter{prefix: "gst: "}
-	args := []string{"-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32"}
-	if hw {
-		args = append(args, "-vaapi_device", vaapiDevice)
-	}
-	args = append(args, "-f", "rawvideo", "-pix_fmt", ffPix, "-video_size", fmt.Sprintf("%dx%d", sess.W, sess.H),
-		"-framerate", strconv.Itoa(sess.FPS), "-i", "pipe:0")
-	brate := strconv.Itoa(sess.Bitrate)
-	if hw {
-		args = append(args, "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", brate, "-maxrate", brate,
-			"-g", strconv.Itoa(sess.FPS*2), "-bf", "0", "-async_depth", "1", "-profile:v", "constrained_baseline")
-	} else {
-		args = append(args, "-c:v", "libopenh264", "-b:v", brate, "-g", strconv.Itoa(sess.FPS*2), "-slices", "4", "-threads", "4",
-			"-allow_skip_frames", "0", "-profile:v", "constrained_baseline", "-flags", "+low_delay")
-	}
-	args = append(args, "-bsf:v", "h264_metadata=aud=insert", "-f", "h264", "pipe:1")
-	log.Printf("encoder: hardware(vaapi)=%v", hw)
-	enc := exec.Command("ffmpeg", args...)
-	enc.Stdin = pr
-	enc.Stderr = &logWriter{prefix: "ffmpeg: "}
-	out, err := enc.StdoutPipe()
-	if err != nil {
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		notify("Matlink", "gst-launch-1.0 failed to start: "+err.Error())
-		return
-	}
-	pw.Close()
-	if err := enc.Start(); err != nil {
-		cmd.Process.Kill()
-		cmd.Wait()
-		notify("Matlink", "ffmpeg failed to start: "+err.Error())
-		return
-	}
-	pr.Close()
-	kill := func() { cmd.Process.Kill(); enc.Process.Kill() }
-	defer func() { kill(); cmd.Wait(); enc.Wait() }()
-	go func() { <-done; kill() }()
-
 	fmt.Fprintf(c, "{\"w\":%d,\"h\":%d,\"fps\":%d}\n", sess.W, sess.H, sess.FPS)
 	s.OnState(fmt.Sprintf("Streaming %dx%d@%d to %s", sess.W, sess.H, sess.FPS, hello.Model))
 
 	// Detect a dead peer: the app never sends after hello, so any read return means close.
-	go func() { io.Copy(io.Discard, c); kill() }()
+	gone := make(chan struct{})
+	go func() { io.Copy(io.Discard, c); close(gone) }()
 
-	br := bufio.NewReaderSize(out, 1<<20)
-	err = relayAccessUnits(br, c)
-	log.Printf("stream ended: %v", err)
+	// Prefer the all-GPU gst pipeline; fall back to gst+ffmpeg if it cannot start or delivers nothing.
+	modes := []bool{false}
+	if gstVAOK() {
+		modes = []bool{true, false}
+	}
+	for _, useVA := range modes {
+		p, err := startPipeline(cap, sess, useVA)
+		if err != nil {
+			log.Printf("pipeline %s: %v", p.name, err)
+			continue
+		}
+		fw := &frameWriter{w: c, start: time.Now()}
+		quit := make(chan struct{})
+		go func() {
+			select {
+			case <-done:
+				p.kill()
+			case <-gone:
+				p.kill()
+			case <-time.After(6 * time.Second):
+				if fw.frames.Load() == 0 {
+					log.Printf("pipeline %s: no frame after 6s", p.name)
+					p.kill()
+				}
+			case <-quit:
+			}
+		}()
+		log.Printf("encoder: %s", p.name)
+		err = p.relay(p.out, fw)
+		close(quit)
+		p.kill()
+		p.wait()
+		log.Printf("stream ended (%s, %d frames): %v", p.name, fw.frames.Load(), err)
+		if fw.frames.Load() == 0 && useVA {
+			select {
+			case <-done:
+			case <-gone:
+			default:
+				gstVAFailed.Store(true)
+				continue
+			}
+		}
+		break
+	}
 	s.OnState("")
 }
 
@@ -261,39 +246,254 @@ func (l *logWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// pipeline is one capture-to-H.264 process chain whose stdout is relayed to the tablet.
+type pipeline struct {
+	name  string
+	cmds  []*exec.Cmd
+	out   io.Reader
+	relay func(r io.Reader, fw *frameWriter) error
+}
+
+func (p *pipeline) kill() {
+	for _, c := range p.cmds {
+		if c.Process != nil {
+			c.Process.Kill()
+		}
+	}
+}
+
+func (p *pipeline) wait() {
+	for _, c := range p.cmds {
+		c.Wait()
+	}
+}
+
+// frameWriter frames access units as [u32 len][u64 pts_us][data], one TCP write each.
+type frameWriter struct {
+	w      io.Writer
+	start  time.Time
+	buf    []byte
+	frames atomic.Int64
+	fix    pocFixer
+}
+
+func (f *frameWriter) send(au []byte) error {
+	au = f.fix.rewrite(au)
+	f.buf = append(f.buf[:0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(f.buf[0:], uint32(len(au)))
+	binary.BigEndian.PutUint64(f.buf[4:], uint64(time.Since(f.start).Microseconds()))
+	f.buf = append(f.buf, au...)
+	_, err := f.w.Write(f.buf)
+	f.frames.Add(1)
+	return err
+}
+
+func startPipeline(cap *Capture, sess Session, gstVA bool) (*pipeline, error) {
+	if gstVA {
+		return startGstVA(cap, sess)
+	}
+	return startFFmpeg(cap, sess)
+}
+
+// startGstVA runs the whole path on the GPU: PipeWire (DMA-BUF) -> VA postproc -> VA H.264 encoder -> GDP-framed access units.
+// No raw frames cross a pipe and no second process is involved.
+func startGstVA(cap *Capture, sess Session) (*pipeline, error) {
+	p := &pipeline{name: "gst-va", relay: relayGDP}
+	// PipeWire delivers variable-rate frames (framerate=0/1) and vah264enc then assumes 30 fps for rate control,
+	// which would make the stream run at 30/fps times the requested bitrate. Scale the target to compensate.
+	kbps := max(sess.Bitrate/1000*30/sess.FPS, 300)
+	args := []string{"-q",
+		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
+		"!", "vapostproc",
+		"!", fmt.Sprintf("video/x-raw(memory:VAMemory),format=NV12,width=%d,height=%d", sess.W, sess.H),
+		"!", "vah264enc", "rate-control=cbr", "bitrate=" + strconv.Itoa(kbps), "cpb-size=" + strconv.Itoa(max(kbps/15, 64)),
+		"target-usage=7", "b-frames=0", "ref-frames=1", "key-int-max=1024", "aud=true", "cabac=false",
+		"!", "video/x-h264,profile=constrained-baseline",
+		"!", "h264parse", "config-interval=-1",
+		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
+		"!", "gdppay",
+		"!", "fdsink", "fd=1", "sync=false",
+	}
+	cmd := exec.Command("gst-launch-1.0", args...)
+	cmd.ExtraFiles = []*os.File{cap.PWFile}
+	cmd.Stderr = &logWriter{prefix: "gst: "}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return p, err
+	}
+	if err := cmd.Start(); err != nil {
+		return p, err
+	}
+	p.cmds, p.out = []*exec.Cmd{cmd}, out
+	return p, nil
+}
+
+// startFFmpeg is the fallback: gst converts to raw frames, threaded ffmpeg encodes (VAAPI or OpenH264).
+func startFFmpeg(cap *Capture, sess Session) (*pipeline, error) {
+	hw := vaapiOK()
+	p := &pipeline{name: "gst+ffmpeg-sw", relay: relayAccessUnits}
+	if hw {
+		p.name = "gst+ffmpeg-vaapi"
+	}
+	pixFmt, ffPix := "I420", "yuv420p"
+	if hw {
+		pixFmt, ffPix = "NV12", "nv12"
+	}
+	gstArgs := []string{"-q",
+		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
+		"!", "videoconvert", "n-threads=2", "!", "videoscale",
+		"!", fmt.Sprintf("video/x-raw,format=%s,width=%d,height=%d", pixFmt, sess.W, sess.H),
+		"!", "fdsink", "fd=1", "sync=false",
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return p, err
+	}
+	setPipeSize(pw, 1<<20)
+	cmd := exec.Command("gst-launch-1.0", gstArgs...)
+	cmd.ExtraFiles = []*os.File{cap.PWFile}
+	cmd.Stdout = pw
+	cmd.Stderr = &logWriter{prefix: "gst: "}
+	args := []string{"-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32", "-analyzeduration", "0"}
+	if hw {
+		args = append(args, "-vaapi_device", vaapiDevice)
+	}
+	args = append(args, "-f", "rawvideo", "-pix_fmt", ffPix, "-video_size", fmt.Sprintf("%dx%d", sess.W, sess.H),
+		"-framerate", strconv.Itoa(sess.FPS), "-i", "pipe:0")
+	brate := strconv.Itoa(sess.Bitrate)
+	// keyframes only at the start: the TCP stream is lossless, and periodic IDRs cause latency spikes
+	gop := "1000000"
+	if hw {
+		args = append(args, "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", brate, "-maxrate", brate,
+			"-g", gop, "-bf", "0", "-async_depth", "1", "-compression_level", "7", "-profile:v", "constrained_baseline")
+	} else {
+		args = append(args, "-c:v", "libopenh264", "-b:v", brate, "-g", gop, "-slices", "4", "-threads", "4",
+			"-allow_skip_frames", "0", "-profile:v", "constrained_baseline", "-flags", "+low_delay")
+	}
+	args = append(args, "-bsf:v", "h264_metadata=aud=insert", "-flush_packets", "1", "-f", "h264", "pipe:1")
+	enc := exec.Command("ffmpeg", args...)
+	enc.Stdin = pr
+	enc.Stderr = &logWriter{prefix: "ffmpeg: "}
+	out, err := enc.StdoutPipe()
+	if err != nil {
+		return p, err
+	}
+	if err := cmd.Start(); err != nil {
+		notify("Matlink", "gst-launch-1.0 failed to start: "+err.Error())
+		return p, err
+	}
+	pw.Close()
+	if err := enc.Start(); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		notify("Matlink", "ffmpeg failed to start: "+err.Error())
+		return p, err
+	}
+	pr.Close()
+	p.cmds, p.out = []*exec.Cmd{cmd, enc}, out
+	return p, nil
+}
+
+// setPipeSize enlarges a pipe buffer (default 64 KiB) so raw frames cross in few syscalls.
+func setPipeSize(f *os.File, n int) {
+	const fSetPipeSz = 1031
+	syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), fSetPipeSz, uintptr(n))
+}
+
+const gdpHeaderLen = 62
+
+// relayGDP reads GStreamer Data Protocol packets and forwards each buffer (exactly one access unit) at once.
+func relayGDP(r io.Reader, fw *frameWriter) error {
+	br := bufio.NewReaderSize(r, 1<<20)
+	hdr := make([]byte, gdpHeaderLen)
+	var buf []byte
+	for {
+		if _, err := io.ReadFull(br, hdr); err != nil {
+			return err
+		}
+		typ := binary.BigEndian.Uint16(hdr[4:6])
+		n := int(binary.BigEndian.Uint32(hdr[6:10]))
+		if hdr[0] != 1 || n > 16<<20 {
+			return fmt.Errorf("gdp: bad packet (version %d, size %d)", hdr[0], n)
+		}
+		if cap(buf) < n {
+			buf = make([]byte, n)
+		}
+		buf = buf[:n]
+		if _, err := io.ReadFull(br, buf); err != nil {
+			return err
+		}
+		if typ != 1 { // 1 = buffer; caps and events are skipped
+			continue
+		}
+		if err := fw.send(buf); err != nil {
+			return err
+		}
+	}
+}
+
 var startCode = []byte{0, 0, 1}
 
-// relayAccessUnits splits an Annex-B stream at access unit delimiters (NAL type 9)
-// and writes [u32 len][u64 pts_us][data] frames.
-func relayAccessUnits(r io.Reader, w io.Writer) error {
-	buf := make([]byte, 0, 1<<20)
-	tmp := make([]byte, 256<<10)
-	start := time.Now()
-	scanFrom := 5
-	send := func(au []byte) error {
-		hdr := make([]byte, 12)
-		binary.BigEndian.PutUint32(hdr[0:], uint32(len(au)))
-		binary.BigEndian.PutUint64(hdr[4:], uint64(time.Since(start).Microseconds()))
-		_, err := w.Write(append(hdr, au...))
-		return err
+// relayAccessUnits splits an Annex-B stream at access unit delimiters (NAL type 9). The tail
+// access unit is flushed as soon as the encoder stops writing, instead of waiting for the next
+// frame's delimiter, which would add a full frame interval (or an unbounded stall on static content).
+func relayAccessUnits(r io.Reader, fw *frameWriter) error {
+	type chunk struct {
+		b   []byte
+		err error
 	}
-	for {
-		n, err := r.Read(tmp)
-		buf = append(buf, tmp[:n]...)
+	chunks := make(chan chunk, 16)
+	go func() {
 		for {
-			i := findAUD(buf, scanFrom)
-			if i < 0 {
-				scanFrom = max(5, len(buf)-4)
-				break
+			b := make([]byte, 64<<10)
+			n, err := r.Read(b)
+			if n > 0 {
+				chunks <- chunk{b: b[:n]}
 			}
-			if werr := send(buf[:i]); werr != nil {
-				return werr
+			if err != nil {
+				chunks <- chunk{err: err}
+				return
 			}
-			buf = append(buf[:0], buf[i:]...)
-			scanFrom = 5
 		}
-		if err != nil {
-			return err
+	}()
+	buf := make([]byte, 0, 1<<20)
+	scanFrom := 5
+	idle := time.NewTimer(time.Hour)
+	defer idle.Stop()
+	for {
+		select {
+		case c := <-chunks:
+			if c.err != nil {
+				return c.err
+			}
+			buf = append(buf, c.b...)
+			for {
+				i := findAUD(buf, scanFrom)
+				if i < 0 {
+					scanFrom = max(5, len(buf)-4)
+					break
+				}
+				if err := fw.send(buf[:i]); err != nil {
+					return err
+				}
+				buf = append(buf[:0], buf[i:]...)
+				scanFrom = 5
+			}
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(2 * time.Millisecond)
+		case <-idle.C:
+			if len(buf) > 0 {
+				if err := fw.send(buf); err != nil {
+					return err
+				}
+				buf = buf[:0]
+				scanFrom = 5
+			}
 		}
 	}
 }
@@ -324,7 +524,29 @@ const vaapiDevice = "/dev/dri/renderD128"
 var (
 	vaapiOnce sync.Once
 	vaapiYes  bool
+	gstVAOnce sync.Once
+	gstVAYes  bool
+
+	gstVAFailed atomic.Bool
 )
+
+// gstVAOK reports whether the all-GPU gst pipeline (VA postproc + VA H.264 encoder + GDP) works here.
+func gstVAOK() bool {
+	gstVAOnce.Do(func() {
+		if _, err := os.Stat(vaapiDevice); err != nil {
+			return
+		}
+		for _, el := range []string{"vapostproc", "vah264enc", "h264parse", "gdppay"} {
+			if exec.Command("gst-inspect-1.0", "--exists", el).Run() != nil {
+				return
+			}
+		}
+		err := exec.Command("gst-launch-1.0", "-q", "videotestsrc", "num-buffers=3", "!", "video/x-raw,format=BGRx,width=640,height=480,framerate=30/1",
+			"!", "vapostproc", "!", "video/x-raw(memory:VAMemory),format=NV12", "!", "vah264enc", "!", "fakesink").Run()
+		gstVAYes = err == nil
+	})
+	return gstVAYes && !gstVAFailed.Load()
+}
 
 // vaapiOK reports whether ffmpeg can hardware-encode H.264 through VAAPI (needs the freeworld media driver on Fedora).
 func vaapiOK() bool {
