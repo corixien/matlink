@@ -54,6 +54,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        if (Build.VERSION.SDK_INT >= 27) {
+            // show over the lock screen and light the screen when the PC launches the app
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
         prefs = new Prefs(this);
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -221,7 +226,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         while (running) {
             try {
                 stream(s);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 android.util.Log.e("matlink", "stream failed", e);
             }
             if (!running) return;
@@ -248,9 +253,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
         Socket sk = new Socket();
         sk.setTcpNoDelay(true);
+        // small buffer: video that cannot be consumed in time should back up on the PC (which drops frames), not here
+        sk.setReceiveBufferSize(256 << 10);
         sk.connect(new InetSocketAddress("127.0.0.1", prefs.port()), 1500);
         socket = sk;
         try {
+            setStatus("Matlink\n\nConnecting to the PC...");
+            // the PC may need a while to create the virtual monitor (e.g. right after login), but not forever
+            sk.setSoTimeout(20000);
             OutputStream out = sk.getOutputStream();
             JSONObject hello = new JSONObject();
             hello.put("v", 1).put("w", w).put("h", h).put("dpi", dpi).put("model", Build.MODEL)
@@ -262,6 +272,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             JSONObject reply = new JSONObject(readLine(in));
             int vw = reply.getInt("w"), vh = reply.getInt("h");
             setStatus("");
+            // the PC sends a heartbeat at least once per second, so silence means it hung or the link is gone
+            sk.setSoTimeout(6000);
             fit(vw, vh);
             if (Build.VERSION.SDK_INT >= 30) {
                 try { s.setFrameRate(reply.optInt("fps", fps), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE); } catch (Exception ignored) { }
@@ -284,8 +296,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void decode(DataInputStream in, Surface s, int w, int h) throws Exception {
-        int firstLen = in.readInt();
-        long firstPts = in.readLong();
+        int firstLen;
+        long firstPts;
+        do { // len 0 = heartbeat
+            firstLen = in.readInt();
+            firstPts = in.readLong();
+        } while (firstLen == 0);
         baseNs = System.nanoTime();
         minLagUs = -firstPts;
         queuedAt.clear();
@@ -388,9 +404,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if (queuedAt.size() > 256) queuedAt.clear();
                 queuedAt.put(pts, System.nanoTime());
                 dec.queueInputBuffer(idx, 0, len, pts, 0);
-                len = in.readInt();
-                pts = in.readLong();
-                if (len <= 0 || len > (16 << 20)) throw new IOException("bad frame");
+                do { // len 0 = heartbeat
+                    len = in.readInt();
+                    pts = in.readLong();
+                } while (len == 0);
+                if (len < 0 || len > (16 << 20)) throw new IOException("bad frame");
                 if (len > buf.length) buf = new byte[len];
                 in.readFully(buf, 0, len);
                 // Link lag: how much later than the best case this frame arrived (PC and tablet clocks differ,

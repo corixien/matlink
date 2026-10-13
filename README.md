@@ -11,7 +11,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
    sudo dnf install android-tools kscreen pipewire-gstreamer gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 ffmpeg-free
    ```
 2. On the tablet enable **Developer options** and **USB debugging** (Settings > About tablet > tap *Build number* 7 times).
-3. Download `Matlink-1.1.1-x86_64.AppImage` from the [latest release](../../releases/latest), then:
+3. Download `Matlink-1.2.1-x86_64.AppImage` from the [latest release](../../releases/latest), then:
    ```
    chmod +x Matlink-*-x86_64.AppImage
    ./Matlink-*-x86_64.AppImage
@@ -24,6 +24,7 @@ Tested on Fedora 44 KDE Plasma 6 (Wayland) with a Galaxy Tab A9+ (Android 16). O
 - Automatic: detects the tablet, sets up the USB tunnel, installs/updates and launches the app, creates the virtual monitor, removes it when unplugged.
 - Resolution matched to the tablet (capped to what its hardware H.264 decoder supports), portrait or landscape, UI scale from the tablet density.
 - Low latency: the whole PC side runs on the GPU (PipeWire DMA-BUF, VA scaling and VA H.264 encoder in one GStreamer pipeline, no raw frames through pipes, each frame sent the moment it is encoded). The stream is rewritten to picture-order type 2 so the tablet's hardware decoder outputs every frame immediately. Needs the full media driver on Fedora: RPM Fusion, then `sudo dnf swap libva-intel-media-driver intel-media-driver --allowerasing` (Intel). Without it, Matlink falls back to GStreamer capture with ffmpeg (VAAPI or OpenH264) encoding, which has higher latency.
+- Stays responsive under load: Matlink runs with a high CPU weight, drops stale frames instead of queueing them, and a 20 s health check re-opens the tablet app, restores the USB tunnel and restarts stalled streams (tray: *Keep tablet screen active*).
 - Frame rate follows the tablet's screen refresh (e.g. 90 Hz) by default.
 - Hardware decoding on the tablet, low-latency H.264 over USB (no Wi-Fi needed).
 - Cursor shown on the tablet; the monitor appears as a normal extra screen in System Settings > Display.
