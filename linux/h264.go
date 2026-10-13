@@ -115,96 +115,11 @@ func (p *pocFixer) fixSPS(n []byte) []byte {
 	r.ue() // pic_order_cnt_type = 0
 	r.ue() // log2_max_pic_order_cnt_lsb_minus4
 	pocEnd := r.pos
-	refs := r.ue()   // max_num_ref_frames
-	r.u(1)           // gaps_in_frame_num_value_allowed_flag
-	r.ue()           // pic_width_in_mbs_minus1
-	r.ue()           // pic_height_in_map_units_minus1
-	if r.u(1) == 0 { // frame_mbs_only_flag
-		r.u(1)
-	}
-	r.u(1)           // direct_8x8_inference_flag
-	if r.u(1) == 1 { // frame_cropping_flag
-		r.ue()
-		r.ue()
-		r.ue()
-		r.ue()
-	}
-	vuiPos := r.pos
 	w := &bitWriter{}
 	w.copyBits(src, 0, pocStart)
 	w.ue(2)
-	if r.bad {
-		w.finish(src, pocEnd)
-		return append([]byte{n[0]}, escape(w.b)...)
-	}
-	w.copyBits(src, pocEnd, vuiPos)
-	if !writeLowLatencyVUI(w, src, vuiPos, max(refs, 1)) {
-		w.finish(src, vuiPos)
-		return append([]byte{n[0]}, escape(w.b)...)
-	}
-	w.bit(1) // rbsp stop bit
+	w.finish(src, pocEnd)
 	return append([]byte{n[0]}, escape(w.b)...)
-}
-
-// writeLowLatencyVUI writes vui_parameters_present_flag and a VUI that declares no picture reordering
-// (num_reorder_frames 0, a decoded picture buffer of just the reference frames). Without it hardware
-// decoders size the buffer from the level and hold finished frames back, so a single changed frame
-// (typing, a click) only appears once later frames push it out. Aspect ratio, video signal and timing
-// fields of an existing VUI are kept. It reports false, writing nothing, if the old VUI carries HRD
-// parameters or cannot be parsed.
-func writeLowLatencyVUI(w *bitWriter, src []byte, vuiPos, dpb int) bool {
-	r := &bitReader{b: src, pos: vuiPos}
-	keepEnd := vuiPos // end of the old VUI part that is copied as is
-	if r.u(1) == 1 {
-		if r.u(1) == 1 && r.u(8) == 255 { // aspect_ratio_info_present_flag, aspect_ratio_idc
-			r.u(32)
-		}
-		if r.u(1) == 1 { // overscan_info_present_flag
-			r.u(1)
-		}
-		if r.u(1) == 1 { // video_signal_type_present_flag
-			r.u(4)
-			if r.u(1) == 1 { // colour_description_present_flag
-				r.u(24)
-			}
-		}
-		if r.u(1) == 1 { // chroma_loc_info_present_flag
-			r.ue()
-			r.ue()
-		}
-		if r.u(1) == 1 { // timing_info_present_flag
-			r.u(32)
-			r.u(32)
-			r.u(1)
-		}
-		keepEnd = r.pos
-		if r.u(1) == 1 || r.u(1) == 1 { // nal_hrd_parameters_present_flag, vcl_hrd_parameters_present_flag
-			return false
-		}
-		if r.bad {
-			return false
-		}
-		w.bit(1)
-		w.copyBits(src, vuiPos+1, keepEnd)
-	} else {
-		w.bit(1)
-		for i := 0; i < 4; i++ { // aspect ratio, overscan, video signal type, chroma location: all absent
-			w.bit(0)
-		}
-		w.bit(0) // timing_info_present_flag
-	}
-	w.bit(0)  // nal_hrd_parameters_present_flag
-	w.bit(0)  // vcl_hrd_parameters_present_flag
-	w.bit(0)  // pic_struct_present_flag
-	w.bit(1)  // bitstream_restriction_flag
-	w.bit(1)  // motion_vectors_over_pic_boundaries_flag
-	w.ue(0)   // max_bytes_per_pic_denom
-	w.ue(0)   // max_bits_per_mb_denom
-	w.ue(15)  // log2_max_mv_length_horizontal
-	w.ue(15)  // log2_max_mv_length_vertical
-	w.ue(0)   // max_num_reorder_frames
-	w.ue(dpb) // max_dec_frame_buffering
-	return true
 }
 
 func (p *pocFixer) fixSlice(n []byte) []byte {
