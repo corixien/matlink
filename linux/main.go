@@ -14,14 +14,13 @@ import (
 	"fyne.io/systray"
 )
 
-const version = "1.2.2"
+const version = "1.1.1"
 
 var (
-	mStatus      *systray.MenuItem
-	stateMu      sync.Mutex
-	devices      = map[string]string{} // serial -> adb state
-	session      string
-	sessionSince = time.Now()
+	mStatus *systray.MenuItem
+	stateMu sync.Mutex
+	devices = map[string]string{} // serial -> adb state
+	session string
 )
 
 func setStatus() {
@@ -56,7 +55,6 @@ func main() {
 	}
 	loadConfig()
 	redirectStderr()
-	boostPriority()
 	systray.Run(onReady, func() {})
 }
 
@@ -145,7 +143,25 @@ func onReady() {
 	go func() { <-mQuit.ClickedCh; srv.Stop(); systray.Quit() }()
 	setStatus()
 
-	go healthLoop(srv)
+	// watchdog: re-create the USB tunnel if adb restarted and dropped it
+	go func() {
+		for range time.Tick(15 * time.Second) {
+			conf := getConfig()
+			if !conf.Enabled {
+				continue
+			}
+			for serial, st := range snapshotDevices() {
+				if st != "device" {
+					continue
+				}
+				out, _ := adb("-s", serial, "reverse", "--list")
+				if !strings.Contains(out, fmt.Sprintf("tcp:%d", conf.Port)) {
+					log.Printf("reverse tunnel missing for %s, restoring", serial)
+					adb("-s", serial, "reverse", fmt.Sprintf("tcp:%d", conf.Port), fmt.Sprintf("tcp:%d", conf.Port))
+				}
+			}
+		}
+	}()
 
 	// device tracking
 	ch := make(chan map[string]string, 4)
@@ -292,36 +308,5 @@ func redirectStderr() {
 	d, _ := os.UserCacheDir()
 	if f, err := os.OpenFile(filepath.Join(d, "matlink", "matlink.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 		syscall.Dup2(int(f.Fd()), 2)
-	}
-}
-
-// healthLoop runs every 20 s: restores the adb tunnel, aborts sessions stuck while starting and,
-// when no stream is running, makes sure the tablet screen is on with the Matlink app in front.
-func healthLoop(srv *Server) {
-	for range time.Tick(20 * time.Second) {
-		conf := getConfig()
-		if !conf.Enabled {
-			continue
-		}
-		stateMu.Lock()
-		st, since := session, sessionSince
-		stateMu.Unlock()
-		if strings.HasPrefix(st, "Starting") && time.Since(since) > 45*time.Second {
-			log.Printf("health: session stuck in %q, aborting", st)
-			srv.Stop()
-		}
-		for serial, ds := range snapshotDevices() {
-			if ds != "device" {
-				continue
-			}
-			out, _ := adb("-s", serial, "reverse", "--list")
-			if !strings.Contains(out, fmt.Sprintf("tcp:%d", conf.Port)) {
-				log.Printf("health: reverse tunnel missing for %s, restoring", serial)
-				adb("-s", serial, "reverse", fmt.Sprintf("tcp:%d", conf.Port), fmt.Sprintf("tcp:%d", conf.Port))
-			}
-			if conf.KeepActive && conf.AutoLaunch && !strings.HasPrefix(st, "Streaming") {
-				ensureTabletActive(serial)
-			}
-		}
 	}
 }

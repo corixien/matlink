@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -48,7 +46,7 @@ func newToken() string {
 }
 
 // request performs a portal call that answers through a Request/Response signal.
-func request(ctx context.Context, conn *dbus.Conn, ch chan *dbus.Signal, timeout time.Duration, method string, args ...any) (map[string]dbus.Variant, error) {
+func request(conn *dbus.Conn, ch chan *dbus.Signal, timeout time.Duration, method string, args ...any) (map[string]dbus.Variant, error) {
 	sender := strings.ReplaceAll(strings.TrimPrefix(conn.Names()[0], ":"), ".", "_")
 	// options map is always the last argument and carries handle_token
 	opts := args[len(args)-1].(map[string]dbus.Variant)
@@ -60,7 +58,7 @@ func request(ctx context.Context, conn *dbus.Conn, ch chan *dbus.Signal, timeout
 	}
 	defer conn.RemoveMatchSignal(dbus.WithMatchObjectPath(reqPath), dbus.WithMatchInterface(requestI), dbus.WithMatchMember("Response"))
 	var handle dbus.ObjectPath
-	if err := conn.Object(portalDest, portalPath).CallWithContext(ctx, method, 0, args...).Store(&handle); err != nil {
+	if err := conn.Object(portalDest, portalPath).Call(method, 0, args...).Store(&handle); err != nil {
 		return nil, err
 	}
 	deadline := time.After(timeout)
@@ -78,24 +76,12 @@ func request(ctx context.Context, conn *dbus.Conn, ch chan *dbus.Signal, timeout
 			return res, nil
 		case <-deadline:
 			return nil, fmt.Errorf("portal request timed out")
-		case <-ctx.Done():
-			return nil, ctx.Err()
 		}
 	}
 }
 
 // OpenCapture creates a virtual monitor of the requested size and returns its PipeWire stream.
-func OpenCapture(ctx context.Context, w, h int, restoreToken string) (*Capture, string, error) {
-	c, tok, err := openCapture(ctx, w, h, restoreToken)
-	if err != nil && restoreToken != "" && ctx.Err() == nil {
-		// a stale restore token (after reboot or a compositor restart) makes the portal refuse; start fresh
-		log.Printf("capture with restore token failed (%v), retrying without", err)
-		return openCapture(ctx, w, h, "")
-	}
-	return c, tok, err
-}
-
-func openCapture(ctx context.Context, w, h int, restoreToken string) (*Capture, string, error) {
+func OpenCapture(w, h int, restoreToken string) (*Capture, string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return nil, "", err
@@ -105,7 +91,7 @@ func openCapture(ctx context.Context, w, h int, restoreToken string) (*Capture, 
 	conn.Signal(ch)
 	fail := func(err error) (*Capture, string, error) { c.Close(); return nil, "", err }
 
-	res, err := request(ctx, conn, ch, 10*time.Second, screencastI+".CreateSession", map[string]dbus.Variant{
+	res, err := request(conn, ch, 10*time.Second, screencastI+".CreateSession", map[string]dbus.Variant{
 		"session_handle_token": dbus.MakeVariant(newToken()),
 	})
 	if err != nil {
@@ -122,10 +108,10 @@ func openCapture(ctx context.Context, w, h int, restoreToken string) (*Capture, 
 	if restoreToken != "" {
 		opts["restore_token"] = dbus.MakeVariant(restoreToken)
 	}
-	if _, err = request(ctx, conn, ch, 30*time.Second, screencastI+".SelectSources", c.session, opts); err != nil {
+	if _, err = request(conn, ch, 30*time.Second, screencastI+".SelectSources", c.session, opts); err != nil {
 		return fail(err)
 	}
-	res, err = request(ctx, conn, ch, 120*time.Second, screencastI+".Start", c.session, "", map[string]dbus.Variant{})
+	res, err = request(conn, ch, 120*time.Second, screencastI+".Start", c.session, "", map[string]dbus.Variant{})
 	if err != nil {
 		return fail(err)
 	}
@@ -151,7 +137,7 @@ func openCapture(ctx context.Context, w, h int, restoreToken string) (*Capture, 
 		}
 	}
 	var fd dbus.UnixFD
-	if err = conn.Object(portalDest, portalPath).CallWithContext(ctx, screencastI+".OpenPipeWireRemote", 0, c.session, map[string]dbus.Variant{}).Store(&fd); err != nil {
+	if err = conn.Object(portalDest, portalPath).Call(screencastI+".OpenPipeWireRemote", 0, c.session, map[string]dbus.Variant{}).Store(&fd); err != nil {
 		return fail(err)
 	}
 	c.PWFile = os.NewFile(uintptr(fd), "pipewire")

@@ -17,7 +17,7 @@ import (
 const (
 	appPackage     = "com.matlink.display"
 	appActivity    = appPackage + "/.MainActivity"
-	appVersionCode = 8 // keep in sync with android/app/build.gradle
+	appVersionCode = 7 // keep in sync with android/app/build.gradle
 )
 
 type DeviceEvent struct {
@@ -113,40 +113,12 @@ func prepareDevice(serial string, port int, conf Config) error {
 		}
 	}
 	if conf.AutoLaunch {
-		return launchApp(serial)
-	}
-	return nil
-}
-
-// launchApp wakes the tablet and brings the Matlink app to the front.
-func launchApp(serial string) error {
-	adb("-s", serial, "shell", "input keyevent KEYCODE_WAKEUP")
-	if out, err := adb("-s", serial, "shell", "am", "start", "-n", appActivity,
-		"--ez", "autostart", "true", "-f", "0x10000000"); err != nil {
-		log.Printf("launch: %s", out)
-		return fmt.Errorf("could not launch app (installed?): %s", out)
-	}
-	return nil
-}
-
-// ensureTabletActive relaunches the app when the tablet screen is off or another app has the focus.
-func ensureTabletActive(serial string) {
-	out, err := adb("-s", serial, "shell", "dumpsys power | grep -m1 mWakefulness=; dumpsys window | grep -m1 mCurrentFocus")
-	if err != nil {
-		return
-	}
-	awake := strings.Contains(out, "mWakefulness=Awake")
-	focused := false
-	for _, ln := range strings.Split(out, "\n") {
-		if strings.Contains(ln, "mCurrentFocus") && strings.Contains(ln, appPackage) {
-			focused = true
+		adb("-s", serial, "shell", "input keyevent KEYCODE_WAKEUP")
+		if out, err := adb("-s", serial, "shell", "am", "start", "-n", appActivity,
+			"--ez", "autostart", "true", "-f", "0x10000000"); err != nil {
+			log.Printf("launch: %s", out)
+			return fmt.Errorf("could not launch app (installed?): %s", out)
 		}
 	}
-	if awake && focused {
-		return
-	}
-	log.Printf("health: tablet %s awake=%v appFocused=%v, relaunching app", serial, awake, focused)
-	if err := launchApp(serial); err != nil {
-		log.Printf("health: %v", err)
-	}
+	return nil
 }

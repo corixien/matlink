@@ -16,13 +16,12 @@ type Config struct {
 	Position     string `json:"position"`   // right,left,above,below
 	AutoLaunch   bool   `json:"autoLaunch"`
 	AutoInstall  bool   `json:"autoInstall"`
-	KeepActive   bool   `json:"keepActive"` // every 20 s make sure the tablet app is open and the screen on
 	Port         int    `json:"port"`
 	RestoreToken string `json:"restoreToken,omitempty"`
 }
 
 var (
-	cfg   = Config{Enabled: true, Resolution: "auto", FPS: 0, Quality: "auto", Scale: "auto", Position: "right", AutoLaunch: true, AutoInstall: true, KeepActive: true, Port: 27183}
+	cfg   = Config{Enabled: true, Resolution: "auto", FPS: 0, Quality: "auto", Scale: "auto", Position: "right", AutoLaunch: true, AutoInstall: true, Port: 27183}
 	cfgMu sync.Mutex
 )
 

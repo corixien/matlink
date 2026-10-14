@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -72,33 +71,30 @@ func ConfigureVirtualOutput(w, h, fps int, scale float64, position string) (stri
 		return "", fmt.Errorf("virtual output did not appear")
 	}
 	name := virt.Name
-	// pickMode finds the mode of the output matching the size (kscreen may round the width by up to 8)
-	// and the refresh rate closest to fps.
-	pickMode := func(o *kOutput) (id string, mw, mh int, close bool) {
-		best := 1e9
-		for _, m := range o.Modes {
-			dw := m.Size.Width - w
-			if m.Size.Height != h || dw > 8 || dw < -8 {
-				continue
-			}
-			if d := math.Abs(m.Refresh - float64(fps)); d < best {
-				best, id, mw, mh = d, m.ID, m.Size.Width, m.Size.Height
+	has := func() bool {
+		for _, m := range virt.Modes {
+			if m.Size.Width == w && m.Size.Height == h {
+				return true
 			}
 		}
-		return id, mw, mh, best <= 2
+		return false
 	}
-	_, _, _, ok := pickMode(virt)
-	if !ok {
+	if !has() {
 		if err := kscreen(fmt.Sprintf("output.%s.addCustomMode.%d.%d.%d.reduced", name, w, h, fps*1000)); err != nil {
 			return name, err
 		}
 	}
-	// apply mode, scale and position in one call
+	// pick mode id, then apply mode, scale and position in one call
 	outs, _ := kscreenOutputs()
 	modeID := ""
-	for i := range outs {
-		if outs[i].Name == name {
-			modeID, w, h, _ = pickMode(&outs[i])
+	for _, o := range outs {
+		if o.Name != name {
+			continue
+		}
+		for _, m := range o.Modes {
+			if m.Size.Width == w && m.Size.Height == h {
+				modeID = m.ID
+			}
 		}
 	}
 	if modeID == "" {

@@ -1,28 +1,6 @@
 package main
 
-import (
-	"sync"
-	"time"
-
-	"github.com/godbus/dbus/v5"
-)
-
-var (
-	notifyMu   sync.Mutex
-	notifyLast = map[string]time.Time{}
-)
-
-// notifyThrottled shows a notification at most once per minute per key, so a retry loop cannot spam the desktop.
-func notifyThrottled(key, title, body string) {
-	notifyMu.Lock()
-	if time.Since(notifyLast[key]) < time.Minute {
-		notifyMu.Unlock()
-		return
-	}
-	notifyLast[key] = time.Now()
-	notifyMu.Unlock()
-	notify(title, body)
-}
+import "github.com/godbus/dbus/v5"
 
 func notify(title, body string) {
 	conn, err := dbus.ConnectSessionBus()

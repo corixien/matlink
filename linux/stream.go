@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -41,6 +40,8 @@ type Session struct {
 
 var qualityBPP = map[string]float64{"low": 0.05, "medium": 0.09, "high": 0.14, "ultra": 0.22}
 
+func even(v int) int { return v &^ 1 }
+
 // resolve merges tablet request and PC settings into the effective session.
 func resolve(h Hello, c Config) Session {
 	w, ht := h.W, h.H
@@ -61,8 +62,7 @@ func resolve(h Hello, c Config) Session {
 			w, ht = fw, fh
 		}
 	}
-	// kscreen rounds custom mode widths to a multiple of 8 (1730 -> 1728), so align here or the mode is never found
-	s := Session{W: w &^ 15, H: ht &^ 7, FPS: 60}
+	s := Session{W: even(w), H: even(ht), FPS: 60}
 	if h.FPS > 0 {
 		s.FPS = h.FPS
 	}
@@ -94,7 +94,7 @@ func resolve(h Hello, c Config) Session {
 
 // Server accepts tablet connections.
 type Server struct {
-	sem     chan struct{} // one capture session at a time
+	sessMu  sync.Mutex // one capture session at a time
 	ln      net.Listener
 	mu      sync.Mutex
 	cancel  func()
@@ -107,7 +107,6 @@ func (s *Server) Start(port int) error {
 		return err
 	}
 	s.ln = ln
-	s.sem = make(chan struct{}, 1)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -146,12 +145,6 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 			s.OnState("")
 		}
 	}()
-	if tc, ok := c.(*net.TCPConn); ok {
-		// A small send buffer bounds how much video can pile up between us and adb when the
-		// system is under load; the leaky queue in the pipeline then drops raw frames instead.
-		tc.SetNoDelay(true)
-		tc.SetWriteBuffer(256 << 10)
-	}
 	c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := bufio.NewReader(c).ReadBytes('\n')
 	if err != nil {
@@ -162,14 +155,10 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 	if json.Unmarshal(line, &hello) != nil {
 		return
 	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
 	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
 	case <-done: // superseded while waiting
-		return
-	}
-	select {
-	case <-done:
 		return
 	default:
 	}
@@ -180,30 +169,12 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 	sess := resolve(hello, conf)
 	log.Printf("tablet %q wants %dx%d dpi %d -> session %+v", hello.Model, hello.W, hello.H, hello.DPI, sess)
 	s.OnState("Starting " + fmt.Sprintf("%dx%d", sess.W, sess.H) + "...")
-	defer s.OnState("")
 
-	ctx, cancelCtx := context.WithCancel(context.Background())
-	defer cancelCtx()
-	go func() {
-		select {
-		case <-done:
-			cancelCtx()
-		case <-ctx.Done():
-		}
-	}()
-
-	cap, tok, err := OpenCapture(ctx, sess.W, sess.H, conf.RestoreToken)
+	cap, tok, err := OpenCapture(sess.W, sess.H, conf.RestoreToken)
 	if err != nil {
 		log.Printf("capture: %v", err)
-		if ctx.Err() == nil {
-			notifyThrottled("capture", "Matlink", "Could not create virtual display: "+err.Error())
-			s.OnState("Error: " + err.Error())
-			// keep the connection a moment so the tablet does not hammer the portal while the desktop is still starting
-			select {
-			case <-done:
-			case <-time.After(3 * time.Second):
-			}
-		}
+		notify("Matlink", "Could not create virtual display: "+err.Error())
+		s.OnState("Error: " + err.Error())
 		return
 	}
 	defer cap.Close()
@@ -234,75 +205,38 @@ func (s *Server) handle(c net.Conn, done chan struct{}) {
 		}
 		fw := &frameWriter{w: c, start: time.Now()}
 		quit := make(chan struct{})
-		go watchPipeline(p, fw, done, gone, quit)
+		go func() {
+			select {
+			case <-done:
+				p.kill()
+			case <-gone:
+				p.kill()
+			case <-time.After(6 * time.Second):
+				if fw.frames.Load() == 0 {
+					log.Printf("pipeline %s: no frame after 6s", p.name)
+					p.kill()
+				}
+			case <-quit:
+			}
+		}()
 		log.Printf("encoder: %s", p.name)
 		err = p.relay(p.out, fw)
 		close(quit)
 		p.kill()
 		p.wait()
 		log.Printf("stream ended (%s, %d frames): %v", p.name, fw.frames.Load(), err)
-		if fw.frames.Load() > 0 {
-			if useVA {
-				gstVAFails.Store(0)
+		if fw.frames.Load() == 0 && useVA {
+			select {
+			case <-done:
+			case <-gone:
+			default:
+				gstVAFailed.Store(true)
+				continue
 			}
-			break
-		}
-		select {
-		case <-done:
-		case <-gone:
-		default:
-			if useVA {
-				gstVAFails.Add(1) // after 3 sessions in a row without a frame, stop trying the GPU pipeline
-			}
-			continue
 		}
 		break
 	}
-}
-
-// watchPipeline kills the pipeline when the session is superseded, the tablet is gone, no first frame
-// arrives, or the encoder stalls; it also keeps the link alive with heartbeats while the screen is static.
-func watchPipeline(p *pipeline, fw *frameWriter, done, gone, quit chan struct{}) {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	began := time.Now()
-	var lastFrames int64
-	stale := 0
-	for {
-		select {
-		case <-done:
-			p.kill()
-			return
-		case <-gone:
-			p.kill()
-			return
-		case <-quit:
-			return
-		case <-tick.C:
-			n := fw.frames.Load()
-			switch {
-			case n == 0:
-				if time.Since(began) > 10*time.Second {
-					log.Printf("pipeline %s: no frame after 10s", p.name)
-					p.kill()
-					return
-				}
-			case n == lastFrames:
-				if stale++; stale >= 8 {
-					log.Printf("pipeline %s: stalled for %ds, restarting session", p.name, stale)
-					p.kill()
-					return
-				}
-				fw.heartbeat()
-			default:
-				stale = 0
-				if time.Since(time.Unix(0, fw.last.Load())) >= time.Second {
-					fw.heartbeat()
-				}
-			}
-			lastFrames = n
-		}
-	}
+	s.OnState("")
 }
 
 type logWriter struct{ prefix string }
@@ -335,38 +269,23 @@ func (p *pipeline) wait() {
 }
 
 // frameWriter frames access units as [u32 len][u64 pts_us][data], one TCP write each.
-// A frame with len 0 is a heartbeat that tells the tablet the PC is alive while the screen is static.
 type frameWriter struct {
 	w      io.Writer
 	start  time.Time
-	mu     sync.Mutex
 	buf    []byte
 	frames atomic.Int64
-	last   atomic.Int64 // unix nanoseconds of the last write
 	fix    pocFixer
 }
 
 func (f *frameWriter) send(au []byte) error {
 	au = f.fix.rewrite(au)
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.buf = append(f.buf[:0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	binary.BigEndian.PutUint32(f.buf[0:], uint32(len(au)))
 	binary.BigEndian.PutUint64(f.buf[4:], uint64(time.Since(f.start).Microseconds()))
 	f.buf = append(f.buf, au...)
 	_, err := f.w.Write(f.buf)
 	f.frames.Add(1)
-	f.last.Store(time.Now().UnixNano())
 	return err
-}
-
-func (f *frameWriter) heartbeat() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var hb [12]byte
-	binary.BigEndian.PutUint64(hb[4:], uint64(time.Since(f.start).Microseconds()))
-	f.w.Write(hb[:])
-	f.last.Store(time.Now().UnixNano())
 }
 
 func startPipeline(cap *Capture, sess Session, gstVA bool) (*pipeline, error) {
@@ -384,9 +303,7 @@ func startGstVA(cap *Capture, sess Session) (*pipeline, error) {
 	// which would make the stream run at 30/fps times the requested bitrate. Scale the target to compensate.
 	kbps := max(sess.Bitrate/1000*30/sess.FPS, 300)
 	args := []string{"-q",
-		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=40",
-		// leaky queue: under load or link backpressure drop stale raw frames instead of building latency
-		"!", "queue", "leaky=downstream", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0",
+		"pipewiresrc", "fd=3", "path=" + strconv.Itoa(int(cap.NodeID)), "do-timestamp=true", "keepalive-time=250",
 		"!", "vapostproc",
 		"!", fmt.Sprintf("video/x-raw(memory:VAMemory),format=NV12,width=%d,height=%d", sess.W, sess.H),
 		"!", "vah264enc", "rate-control=cbr", "bitrate=" + strconv.Itoa(kbps), "cpb-size=" + strconv.Itoa(max(kbps/15, 64)),
@@ -610,7 +527,7 @@ var (
 	gstVAOnce sync.Once
 	gstVAYes  bool
 
-	gstVAFails atomic.Int32
+	gstVAFailed atomic.Bool
 )
 
 // gstVAOK reports whether the all-GPU gst pipeline (VA postproc + VA H.264 encoder + GDP) works here.
@@ -628,7 +545,7 @@ func gstVAOK() bool {
 			"!", "vapostproc", "!", "video/x-raw(memory:VAMemory),format=NV12", "!", "vah264enc", "!", "fakesink").Run()
 		gstVAYes = err == nil
 	})
-	return gstVAYes && gstVAFails.Load() < 3
+	return gstVAYes && !gstVAFailed.Load()
 }
 
 // vaapiOK reports whether ffmpeg can hardware-encode H.264 through VAAPI (needs the freeworld media driver on Fedora).
