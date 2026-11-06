@@ -309,7 +309,8 @@ func setAutostart(on bool) {
 }
 
 // installLauncher registers the AppImage in the desktop's application menu
-// (name + icon in the program search). No-op when not run as AppImage.
+// (name + icon in the program search). No-op when not run as AppImage
+// or when AppImageLauncher already did it.
 func installLauncher() {
 	exe := os.Getenv("APPIMAGE")
 	if exe == "" {
@@ -317,6 +318,9 @@ func installLauncher() {
 	}
 	d, _ := os.UserHomeDir()
 	share := filepath.Join(d, ".local", "share")
+	if m, _ := filepath.Glob(filepath.Join(share, "applications", "appimagekit_*-Matlink.desktop")); len(m) > 0 {
+		return // AppImageLauncher already integrated it
+	}
 	icon := filepath.Join(share, "icons", "hicolor", "256x256", "apps", "matlink.png")
 	desktop := filepath.Join(share, "applications", "matlink.desktop")
 	body := "[Desktop Entry]\nType=Application\nName=Matlink\nComment=Use an Android tablet as a USB second monitor\nExec=\"" +
