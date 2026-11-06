@@ -7,3 +7,6 @@ var iconPNG []byte
 
 //go:embed assets/matlink.apk
 var embeddedAPK []byte
+
+//go:embed assets/icon.png
+var appIconPNG []byte

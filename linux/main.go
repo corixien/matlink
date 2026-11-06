@@ -14,7 +14,7 @@ import (
 	"fyne.io/systray"
 )
 
-const version = "1.1.1"
+const version = "1.1.2"
 
 var (
 	mStatus *systray.MenuItem
@@ -55,6 +55,7 @@ func main() {
 	}
 	loadConfig()
 	redirectStderr()
+	installLauncher()
 	systray.Run(onReady, func() {})
 }
 
@@ -111,7 +112,7 @@ func onReady() {
 	radio(mSet, "Position", []opt{{"Right of screens", "right"}, {"Left of screens", "left"}, {"Above", "above"}, {"Below", "below"}},
 		func(c *Config) *string { return &c.Position })
 	toggle(mSet, "Launch app on tablet automatically", func(c *Config) *bool { return &c.AutoLaunch })
-	toggle(mSet, "Install/update app on tablet automatically", func(c *Config) *bool { return &c.AutoInstall })
+	toggle(mSet, "Update app on tablet automatically", func(c *Config) *bool { return &c.AutoInstall })
 	mLogin := mSet.AddSubMenuItemCheckbox("Start at login", "", autostartEnabled())
 	go func() {
 		for range mLogin.ClickedCh {
@@ -204,6 +205,10 @@ func snapshotDevices() map[string]string {
 func connectDevice(serial string) {
 	conf := getConfig()
 	if !conf.Enabled {
+		return
+	}
+	if installedVersion(serial) == 0 {
+		log.Printf("%s: Matlink app not installed, ignoring", serial)
 		return
 	}
 	stateMu.Lock()
@@ -301,6 +306,30 @@ func setAutostart(on bool) {
 	body := "[Desktop Entry]\nType=Application\nName=Matlink\nComment=Use an Android tablet as a USB second monitor\nExec=\"" +
 		strings.ReplaceAll(exe, "\"", "\\\"") + "\"\nIcon=matlink\nX-GNOME-Autostart-enabled=true\n"
 	os.WriteFile(autostartPath(), []byte(body), 0o644)
+}
+
+// installLauncher registers the AppImage in the desktop's application menu
+// (name + icon in the program search). No-op when not run as AppImage.
+func installLauncher() {
+	exe := os.Getenv("APPIMAGE")
+	if exe == "" {
+		return
+	}
+	d, _ := os.UserHomeDir()
+	share := filepath.Join(d, ".local", "share")
+	icon := filepath.Join(share, "icons", "hicolor", "256x256", "apps", "matlink.png")
+	desktop := filepath.Join(share, "applications", "matlink.desktop")
+	body := "[Desktop Entry]\nType=Application\nName=Matlink\nComment=Use an Android tablet as a USB second monitor\nExec=\"" +
+		strings.ReplaceAll(exe, "\"", "\\\"") + "\"\nIcon=matlink\nCategories=Utility;\nTerminal=false\nStartupWMClass=matlink\n"
+	for path, data := range map[string][]byte{icon: appIconPNG, desktop: []byte(body)} {
+		if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
+			continue
+		}
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, data, 0o644)
+	}
+	exec.Command("update-desktop-database", filepath.Dir(desktop)).Run()
+	exec.Command("gtk-update-icon-cache", "-q", "-t", filepath.Join(share, "icons", "hicolor")).Run()
 }
 
 // redirectStderr sends panics and runtime crashes to the log file.

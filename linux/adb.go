@@ -17,7 +17,7 @@ import (
 const (
 	appPackage     = "com.matlink.display"
 	appActivity    = appPackage + "/.MainActivity"
-	appVersionCode = 7 // keep in sync with android/app/build.gradle
+	appVersionCode = 8 // keep in sync with android/app/build.gradle
 )
 
 type DeviceEvent struct {
@@ -93,20 +93,21 @@ func deviceModel(serial string) string {
 	return out
 }
 
-// prepareDevice sets up the reverse tunnel, installs the app if needed and launches it.
+// prepareDevice sets up the reverse tunnel, updates the app if outdated and launches it.
+// Devices without the app (e.g. a phone) are never touched.
 func prepareDevice(serial string, port int, conf Config) error {
 	if out, err := adb("-s", serial, "reverse", fmt.Sprintf("tcp:%d", port), fmt.Sprintf("tcp:%d", port)); err != nil {
 		return fmt.Errorf("adb reverse: %s", out)
 	}
 	if conf.AutoInstall && len(embeddedAPK) > 1000 {
-		if v := installedVersion(serial); v < appVersionCode {
+		if v := installedVersion(serial); v > 0 && v < appVersionCode {
 			dir, _ := os.UserCacheDir()
 			p := filepath.Join(dir, "matlink", "matlink.apk")
 			os.MkdirAll(filepath.Dir(p), 0o755)
 			if err := os.WriteFile(p, embeddedAPK, 0o644); err != nil {
 				return err
 			}
-			notify("Matlink", "Installing the Matlink app on the tablet. Confirm on the tablet if asked.")
+			notify("Matlink", "Updating the Matlink app on the tablet. Confirm on the tablet if asked.")
 			if out, err := adb("-s", serial, "install", "-r", p); err != nil {
 				return fmt.Errorf("install failed: %s", out)
 			}
